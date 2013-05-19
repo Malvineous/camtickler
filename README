@@ -1,0 +1,27 @@
+camtickler: Utility for working with IP camera firmware
+Copyright 2013 Adam Nielsen <malvineous@shikadi.net>
+http://github.com/Malvineous/camtickler
+
+This utility allows you to retrieve and replace firmware for supported models
+of network-connected video cameras.
+
+It can connect to the camera over the network and also over a serial port/UART
+if needed.
+
+Features:
+
+  * Copy firmware from camera.  This is very useful to restore the camera to
+    its original state in case a later flash goes bad.
+
+  * Automatic identification of supported devices.  Some devices require a
+    serial connection (e.g. with a USB to TTL serial adapter) for full
+    functionality.
+
+  * Device detail.  Flash size, USB IDs, etc.  This will eventually be used to
+    identify firmware compatible with the device.
+
+Supported devices are:
+
+  * MayGion MIPS
+
+This program is released under the GPLv3 license.
