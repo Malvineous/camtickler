@@ -218,7 +218,12 @@ bool Network::ftp_login(const std::string& user, const std::string& pass)
 	this->endpoint_iterator_ftp = resolver.resolve(query);
 
 	this->ftp_socket.reset(new boost::asio::ip::tcp::socket(this->io_service_ftp));
-	boost::asio::connect(*this->ftp_socket, this->endpoint_iterator_ftp);
+	try {
+		boost::asio::connect(*this->ftp_socket, this->endpoint_iterator_ftp);
+	} catch (const boost::system::system_error& e) {
+		if (verbose) std::cerr << "[ftp] Login failed: " << e.what() << std::endl;
+		return false;
+	}
 
 	boost::asio::streambuf request;
 	std::ostream request_stream(&request);

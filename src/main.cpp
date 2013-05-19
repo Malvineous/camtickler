@@ -106,7 +106,7 @@ class Identify
 				}
 			}
 
-			int maxConfidence = 50; // must be at least this confident for a result
+			int maxConfidence = 49; // must be more confident than this for a result
 			std::string bestType = "unknown";
 			if (verbose) std::cerr << "Confidence levels:\n";
 			for (std::map<std::string, int>::const_iterator i = confidence.begin(); i != confidence.end(); i++) {
@@ -144,6 +144,8 @@ class Identify
 					if (verbose) std::cerr << "[http] Server is \"" << server << "\"\n";
 					if (server.compare("WebServer(IPCamera_Logo)") == 0) {
 						confidence["maygion-mips"] += 10;
+					} else if (server.compare("Netwave IP Camera") == 0) {
+						confidence["wansview"] += 10;
 					}
 				}
 			}
@@ -156,6 +158,30 @@ class Identify
 			if (this->dev_pass.empty()) url += "admin"; else url += this->dev_pass;
 
 			std::string httpData = network->http_get(url);
+			if (!httpData.empty()) {
+				// Got data from the MayGion info URL
+				if (this->processMayGionInfo(httpData)) {
+					// Done, sure this is the model
+					return true;
+				}
+			}
+
+			// Not MayGion, keep examining
+
+			url = "/get_status.cgi";
+			httpData = network->http_get(url);
+			if (!httpData.empty()) {
+				if (this->processWansview(httpData)) {
+					// Done, sure this is the model
+					return true;
+				}
+			}
+
+			return true;
+		}
+
+		bool processMayGionInfo(const std::string& httpData)
+		{
 			boost::regex result_regex("<Success>(.*)</Success>");
 			boost::match_results<std::string::const_iterator> result_matches;
 			std::string::const_iterator start = httpData.begin();
@@ -213,6 +239,36 @@ class Identify
 			return true;
 		}
 
+		bool processWansview(const std::string& httpData)
+		{
+			boost::regex result_regex("var sys_ver='([^']*)';");
+			boost::match_results<std::string::const_iterator> result_matches;
+			std::string::const_iterator start = httpData.begin();
+			std::string::const_iterator end = httpData.end();
+			boost::regex_search(start, end, result_matches, result_regex, boost::match_default);
+			std::string result(result_matches[1].first, result_matches[1].second);
+			if (result.empty()) return false;
+
+			if (verbose) std::cerr << "[http] Possible Wansview device with "
+				"firmware " << result << "\n";
+			confidence["wansview"] += 20;
+
+			boost::regex app_regex("var app_ver='([^']*)';");
+			boost::match_results<std::string::const_iterator> app_matches;
+			start = httpData.begin();
+			end = httpData.end();
+			boost::regex_search(start, end, app_matches, app_regex, boost::match_default);
+			std::string app_code(app_matches[1].first, app_matches[1].second);
+			if (!app_code.empty()) {
+				if (verbose) std::cerr << "[http] App version " << app_code << "\n";
+				confidence["wansview"] += 20;
+			} else {
+				return false; // not sure
+			}
+
+			return true; // sure
+		}
+
 		bool tryFTP()
 		{
 			// Get password
@@ -235,6 +291,11 @@ class Identify
 						curSection = SECTION_HTTP;
 					} else if (strncmp(cline, "[usr]", 5) == 0) {
 						curSection = SECTION_USR;
+					} else if (cline[0] == '[') {
+						// some other section we don't care about
+						curSection = SECTION_NONE;
+						// If we don't do this, a "port=" in "[smtp]" or similar can
+						// override the HTTP port.
 					} else if ((curSection == SECTION_USR) && (strncmp(cline, "ui=", 3) == 0)) {
 						// This is the UI line
 
@@ -287,11 +348,6 @@ class Identify
 				std::string::size_type pwd_end = cred_dec.find("\r\n", pwd_start);
 				this->dev_pass = cred_dec.substr(pwd_start, pwd_end - pwd_start);
 
-			} else {
-				// Unable to get credentials
-				this->dev_user = "";
-				this->dev_pass = "";
-			}
 			return true;
 		}
 
