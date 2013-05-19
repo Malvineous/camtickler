@@ -35,4 +35,4 @@ yes_have_boost_asio_serial
 
 AM_SILENT_RULES([yes])
 
-AC_OUTPUT(Makefile src/Makefile tests/Makefile)
+AC_OUTPUT(Makefile src/Makefile)
