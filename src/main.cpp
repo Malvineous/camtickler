@@ -51,14 +51,14 @@ void showProgress(const std::string& msg, unsigned long amount, unsigned long to
 {
 	if (total == (unsigned long)-1) {
 		// complete
-		std::cout << std::endl;
+		std::cerr << std::endl;
 		return;
 	}
-	std::cout << "\r" << msg << ": " << amount << " bytes read";
+	std::cerr << "\r" << msg << ": " << amount << " bytes read";
 	if (total) {
-		std::cout << " (" << (amount * 100 / total) << "%)";
+		std::cerr << " (" << (amount * 100 / total) << "%)";
 	}
-	std::cout << std::flush;
+	std::cerr << std::flush;
 	return;
 }
 
@@ -73,82 +73,235 @@ void showProgress(const std::string& msg, unsigned long amount, unsigned long to
 		if (verbose) std::cerr << "; too low, ignoring)\n"; \
 	}
 
-std::string identify(Network& network, boost::asio::serial_port& serial)
+class Identify
 {
-	std::map<std::string, int> confidence;
-	std::string dev_user, dev_pass;
+	public:
+		Identify(Network *network, boost::asio::serial_port *serial)
+			: network(network),
+			  serial(serial),
+			  httpPort(0) // auto
+		{
+		}
 
-	std::cerr << "Attempting to connect to " << network.hostname() << " via HTTP..." << std::endl;
-	std::vector<std::string> headers = network.http_headers();
-	for (std::vector<std::string>::iterator i = headers.begin(); i != headers.end(); i++) {
-		if (i->substr(0, 7).compare("Server:") == 0) {
-			// This is the Server: header
-			std::string server = i->substr(8);
-			if (verbose) std::cerr << "HTTP server is \"" << server << "\"\n";
-			if (server.compare("WebServer(IPCamera_Logo)") == 0) {
-				confidence["maygion-mips"] += 10;
+		std::string getType()
+		{
+			bool okHTTP = this->tryHTTP();
+			bool okFTP = this->tryFTP();
+			if (okFTP && !okHTTP && !this->dev_pass.empty()) {
+				// Try HTTP again now we have some credentials
+				okHTTP = this->tryHTTP();
 			}
-		}
-	}
 
-	const std::string httpData = network.http_get("/sysinfo.xml?user=admin&password=admin");
-	boost::regex result_regex("<Success>(.*)</Success>");
-	boost::match_results<std::string::const_iterator> result_matches;
-	boost::regex_search(httpData.begin(), httpData.end(), result_matches, result_regex, boost::match_default);
-	std::string result(result_matches[1].first, result_matches[1].second);
-	if (result.compare("0") == 0) {
-		if (verbose) std::cerr << "Possible MayGion MIPS with non-default admin password\n";
-		confidence["maygion-mips"] += 10;
+			// If we don't know what port HTTP is and the default didn't work, try a
+			// few alternatives.
+			if ((!okHTTP) && (this->httpPort == 0)) {
+				this->httpPort = 81;
+				okHTTP = this->tryHTTP();
+				if (!okHTTP) {
+					this->httpPort = 8080;
+					okHTTP = this->tryHTTP();
+					if (!okHTTP) {
+						this->httpPort = 0; // couldn't find it
+					}
+				}
+			}
 
-		boost::regex error_regex("<ErrorCode>(.*)</ErrorCode>");
-		boost::match_results<std::string::const_iterator> error_matches;
-		boost::regex_search(httpData.begin(), httpData.end(), error_matches, error_regex, boost::match_default);
-		std::string error_code(error_matches[1].first, error_matches[1].second);
-		if (error_code.compare("eHttpError_No_Auth") == 0) {
-			confidence["maygion-mips"] += 20;
-		} else {
-			std::cerr << "Unknown error trying to get device info: " << error_code << std::endl;
+			int maxConfidence = 50; // must be at least this confident for a result
+			std::string bestType = "unknown";
+			if (verbose) std::cerr << "Confidence levels:\n";
+			for (std::map<std::string, int>::const_iterator i = confidence.begin(); i != confidence.end(); i++) {
+				if (verbose) std::cerr << "  " << i->first << ": " << i->second << "%\n";
+				if (i->second > maxConfidence) {
+					maxConfidence = i->second;
+					bestType = i->first;
+				}
+			}
+			if (!this->dev_user.empty() && !this->dev_pass.empty()) {
+				std::cout << "admin_username=" << this->dev_user
+					<< "\nadmin_password=" << this->dev_pass << std::endl;
+			}
+			return bestType;
 		}
-		// TODO: get password
-		dev_user = "todo";
-		dev_pass = "todo";
-	} else if (result.compare("1") == 0) {
-		if (verbose) std::cerr << "Appears to be a MayGion MIPS with default admin password\n";
-		confidence["maygion-mips"] += 80;
-		dev_user = "admin";
-		dev_pass = "admin";
 
-		boost::regex board_regex("<Board>(.*)</Board>");
-		boost::match_results<std::string::const_iterator> matches;
-		boost::regex_search(httpData.begin(), httpData.end(), matches, board_regex, boost::match_default);
-		std::string board(matches[1].first, matches[1].second);
-		if (verbose) std::cerr << "MayGion board ID: " << board << std::endl;
-		if (board.compare("MIPS") == 0) {
-			confidence["maygion-mips"] = 100;
-		} else {
-			confidence["maygion-mips"] = 0;
-			confidence["maygion-unknown"] = 100;
-		}
-		goto detect_done; // no point checking further
-	} // else not a MayGion MIPS camera or unknown firmware version
+		bool tryHTTP()
+		{
+			this->network->set_http_port(this->httpPort);
+			std::cerr << "[http] Attempting to connect to " << network->hostname()
+				<< " port " << network->get_http_port() << std::endl;
+			std::vector<std::string> headers;
+			try {
+				headers = network->http_headers();
+			} catch (const boost::system::system_error& e) {
+				// Assume HTTP is unavailable on this port
+				std::cerr << "[http] Connection failed." << std::endl;
+				return false;
+			}
 
-detect_done:
-	int maxConfidence = 0;
-	std::string bestType;
-	if (verbose) std::cerr << "Confidence levels:\n";
-	for (std::map<std::string, int>::const_iterator i = confidence.begin(); i != confidence.end(); i++) {
-		if (verbose) std::cerr << "  " << i->first << ": " << i->second << "%\n";
-		if (i->second > maxConfidence) {
-			maxConfidence = i->second;
-			bestType = i->first;
+			for (std::vector<std::string>::iterator i = headers.begin(); i != headers.end(); i++) {
+				if (i->substr(0, 7).compare("Server:") == 0) {
+					// This is the Server: header
+					std::string server = i->substr(8);
+					if (verbose) std::cerr << "[http] Server is \"" << server << "\"\n";
+					if (server.compare("WebServer(IPCamera_Logo)") == 0) {
+						confidence["maygion-mips"] += 10;
+					}
+				}
+			}
+
+			// Use the discovered credentials if present, otherwise fall back to the
+			// default ones.
+			std::string url = "/sysinfo.xml?user=";
+			if (this->dev_user.empty()) url += "admin"; else url += this->dev_user;
+			url += "&password=";
+			if (this->dev_pass.empty()) url += "admin"; else url += this->dev_pass;
+
+			std::string httpData = network->http_get(url);
+			boost::regex result_regex("<Success>(.*)</Success>");
+			boost::match_results<std::string::const_iterator> result_matches;
+			std::string::const_iterator start = httpData.begin();
+			std::string::const_iterator end = httpData.end();
+			boost::regex_search(start, end, result_matches, result_regex, boost::match_default);
+			std::string result(result_matches[1].first, result_matches[1].second);
+			if (result.compare("0") == 0) {
+				if (verbose) std::cerr << "[http] Possible MayGion MIPS with non-default admin password\n";
+				confidence["maygion-mips"] += 20;
+
+				boost::regex error_regex("<ErrorCode>(.*)</ErrorCode>");
+				boost::match_results<std::string::const_iterator> error_matches;
+				std::string::const_iterator start = httpData.begin();
+				std::string::const_iterator end = httpData.end();
+				boost::regex_search(start, end, error_matches, error_regex, boost::match_default);
+				std::string error_code(error_matches[1].first, error_matches[1].second);
+				if (error_code.compare("eHttpError_No_Auth") == 0) {
+					// Newer firmware
+					confidence["maygion-mips"] += 20;
+				} else if (error_code.compare("5") == 0) {
+					// Older firmware
+					confidence["maygion-mips"] += 20;
+				} else {
+					if (verbose) std::cerr << "[http] Unknown error trying to get "
+						"device info: " << error_code << std::endl;
+				}
+				return false;
+			} else if (result.compare("1") != 0) {
+				// Unknown response
+				confidence["maygion-mips"] -= 10;
+				return false;
+			}
+
+			// Got acceptable HTTP response
+			if (verbose) std::cerr << "[http] Appears to be a MayGion MIPS\n";
+			confidence["maygion-mips"] += 10;
+
+			if (this->dev_user.empty() && this->dev_pass.empty()) {
+				if (verbose) std::cerr << "[http] Default user/pass works\n";
+				this->dev_user = "admin";
+				this->dev_pass = "admin";
+			}
+
+			boost::regex board_regex("<Board>(.*)</Board>");
+			boost::match_results<std::string::const_iterator> matches;
+			start = httpData.begin();
+			end = httpData.end();
+			boost::regex_search(start, end, matches, board_regex, boost::match_default);
+			std::string board(matches[1].first, matches[1].second);
+			if (verbose) std::cerr << "[http] MayGion board ID: " << board << std::endl;
+			if (board.compare("MIPS") == 0) {
+				confidence["maygion-mips"] = 100;
+			} // else could be MIPS with old firmware
+
+			return true;
 		}
-	}
-	if (!dev_user.empty() && !dev_pass.empty()) {
-		std::cout << "admin_username=" << dev_user
-			<< "\nadmin_password=" << dev_pass << std::endl;
-	}
-	return bestType;
-}
+
+		bool tryFTP()
+		{
+			// Get password
+			std::string cred_enc;
+			if (network->ftp_login("MayGion", "maygion.com")) {
+				this->confidence["maygion-mips"] = 100;
+
+				std::stringstream config;
+				network->ftp_get(config, "/tmp/eye/app", "cs.ini",
+					boost::bind(showProgress, "Retrieving config", _1, _2));
+				config.seekg(0);
+				enum section {SECTION_NONE, SECTION_HTTP, SECTION_USR};
+				enum section curSection = SECTION_NONE;
+				while (!config.eof()) {
+					std::string line;
+					std::getline(config, line);
+					if (verbose > 1) std::cerr << "[config] " << line << std::endl;
+					const char *cline = line.c_str();
+					if (strncmp(cline, "[http]", 6) == 0) {
+						curSection = SECTION_HTTP;
+					} else if (strncmp(cline, "[usr]", 5) == 0) {
+						curSection = SECTION_USR;
+					} else if ((curSection == SECTION_USR) && (strncmp(cline, "ui=", 3) == 0)) {
+						// This is the UI line
+
+						// From http://base64.sourceforge.net/b64.c
+						static const char cd64[]="|$$$}rstuvwxyz{$$$$$$$>?@ABCDEFGHIJKLMNOPQRSTUVW$$$$$$XYZ[\\]^_`abcdefghijklmnopq";
+						for (std::string::const_iterator i = line.begin() + 3; i != line.end(); i++) {
+							unsigned char v = ((*i < 43 || *i > 122) ? 0 : (int) cd64[ *i - 43 ]);
+							if (v != 0) {
+								v = ((v == '$') ? 0 : v - 61);
+							}
+							cred_enc += v-1;
+						}
+					} else if ((curSection == SECTION_HTTP) && (strncmp(cline, "port=", 5) == 0)) {
+						unsigned int port = strtoul(line.c_str() + 5, NULL, 10);
+						if ((port != 80) && (port != 0)) {
+							if (verbose) std::cerr << "[ftp] Web interface is operating on port "
+								<< port << std::endl;
+							this->httpPort = port;
+							std::cout << "http_port=" << this->httpPort << "\n";
+						}
+					}
+				}
+			} else {
+				// FTP unavailable, try telnet
+				return false;
+			}
+
+			if (!cred_enc.empty()) {
+				std::string cred_dec;
+
+				// From http://base64.sourceforge.net/b64.c
+				for (std::string::const_iterator i = cred_enc.begin(); i != cred_enc.end(); i++) {
+					unsigned char a = *i;
+					if (++i == cred_enc.end()) break;
+					unsigned char b = *i;
+					cred_dec += (char)(a << 2 | b >> 4);
+					if (++i == cred_enc.end()) break;
+					unsigned char c = *i;
+					cred_dec += (char)(b << 4 | c >> 2);
+					if (++i == cred_enc.end()) break;
+					unsigned char d = *i;
+					cred_dec += (char)(((c << 6) & 0xc0) | d);
+				}
+				if (verbose > 1) std::cout << "base64 decoded data: " << cred_dec << std::endl;
+				std::string::size_type usr_start = cred_dec.find("usr=") + 4;
+				std::string::size_type usr_end = cred_dec.find("\r\n", usr_start);
+				this->dev_user = cred_dec.substr(usr_start, usr_end - usr_start);
+
+				std::string::size_type pwd_start = cred_dec.find("pwd=") + 4;
+				std::string::size_type pwd_end = cred_dec.find("\r\n", pwd_start);
+				this->dev_pass = cred_dec.substr(pwd_start, pwd_end - pwd_start);
+
+			} else {
+				// Unable to get credentials
+				this->dev_user = "";
+				this->dev_pass = "";
+			}
+			return true;
+		}
+
+	private:
+		Network *network;
+		boost::asio::serial_port *serial;
+		std::map<std::string, int> confidence;
+		std::string dev_user, dev_pass;
+		unsigned int httpPort;
+};
 
 int main(int argc, char *argv[])
 {
@@ -280,7 +433,8 @@ int main(int argc, char *argv[])
 		// Run through the actions on the command line
 		for (std::vector<po::option>::iterator i = pa.options.begin(); i != pa.options.end(); i++) {
 			if (i->string_key.compare("identify") == 0) {
-				strType = identify(network, serial);
+				Identify id(&network, &serial);
+				strType = id.getType();
 				std::cout << "device_type=";
 				if (strType.empty()) {
 					std::cout << "unknown" << std::endl;
@@ -317,6 +471,7 @@ int main(int argc, char *argv[])
 					std::cerr << PROGNAME ": --type missing or invalid." << std::endl;
 					return RET_BADARGS;
 				}
+				bool known_model = false;
 				try {
 					unsigned long lenFlash;
 					dev->getFlashInfo(&lenFlash);
@@ -330,6 +485,25 @@ int main(int argc, char *argv[])
 						<< "\ncamera_usb_product=" << std::setw(4) << std::setfill('0') << idProduct
 						<< "\ncamera_usb_class=" << std::setw(2) << std::setfill('0') << (unsigned int)bInterfaceClass
 						<< std::endl;
+
+					std::cout << "model=" << strType << "-";
+					if ((lenFlash == 0x400000) && (idVendor == 0x0c45) && (idProduct == 0x6360)) {
+						std::cout << "1.0";
+						known_model = true;
+					} else {
+						std::cout << "ver_unknown";
+					}
+					std::cout << "\n";
+
+					std::cout << "fwid=" << strType << "-" << (lenFlash >> 20) << "mb-";
+					if (bInterfaceClass == 0x0e) std::cout << "uvc";
+					else std::cout << "unknown_image_sensor";
+					std::cout << "\n";
+
+					if (!known_model) {
+						std::cerr << "\n\n >>> This camera is an unknown model!  Please get in "
+							"touch!\nhttp://www.openipcam.com/forum/\n" << std::endl;
+					}
 				} catch (const std::string& err) {
 					std::cerr << "Device query failed: " << err
 						<< std::endl;

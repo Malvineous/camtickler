@@ -23,19 +23,40 @@
 
 Network::Network(const std::string& host)
 	: host(host),
+	  port_http(0),
 	  okFTP(false)
 {
 	// Get a list of endpoints corresponding to the server name
+	this->set_http_port(0);
+}
+
+void Network::set_http_port(unsigned short port)
+{
+	this->port_http = port;
+	std::string service_name;
+	if (this->port_http != 0) {
+		std::stringstream ss;
+		ss << this->port_http;
+		service_name = ss.str();
+	} else {
+		service_name = "http"; // default port
+	}
 	boost::asio::ip::tcp::resolver resolver(this->io_service);
-	boost::asio::ip::tcp::resolver::query query(host, "http");
+	boost::asio::ip::tcp::resolver::query query(host, service_name);
 	this->endpoint_iterator_http = resolver.resolve(query);
+	return;
+}
+
+unsigned short Network::get_http_port()
+{
+	return this->endpoint_iterator_http->endpoint().port();
 }
 
 std::vector<std::string> Network::http_headers()
 {
 	std::vector<std::string> headers;
 
-	if (verbose) std::cerr << "Trying to get HTTP headers..." << std::endl;
+	if (verbose) std::cerr << "[http] Trying to get HTTP headers..." << std::endl;
 
 	// Try each endpoint until we successfully establish a connection
 	boost::asio::ip::tcp::socket socket(this->io_service);
@@ -69,7 +90,7 @@ std::vector<std::string> Network::http_headers()
 	std::string status_message;
 	std::getline(response_stream, status_message);
 	if (!response_stream || http_version.substr(0, 5) != "HTTP/") {
-		if (verbose) std::cerr << " - Invalid HTTP response\n";
+		if (verbose) std::cerr << "[http] Invalid response (not HTTP)\n";
 		return headers;
 	}
 
@@ -81,7 +102,7 @@ std::vector<std::string> Network::http_headers()
 	while (std::getline(response_stream, header) && header != "\r") {
 		std::string::size_type len = header.length();
 		if (header[len - 1] == '\r') header = header.substr(0, len - 1);
-		if (verbose > 1) std::cerr << " - Got header: " << header << "\n";
+		if (verbose > 1) std::cerr << "[http/header] " << header << "\n";
 		headers.push_back(header);
 	}
 
@@ -90,7 +111,8 @@ std::vector<std::string> Network::http_headers()
 
 std::string Network::http_get(const std::string& path)
 {
-	if (verbose) std::cerr << "Trying to download \"" << path << "\"..." << std::endl;
+	if (verbose) std::cerr << "[http] Trying to download \"" << path << "\"..."
+		<< std::endl;
 
 	// Try each endpoint until we successfully establish a connection
 	boost::asio::ip::tcp::socket socket(this->io_service);
@@ -125,12 +147,12 @@ std::string Network::http_get(const std::string& path)
 	std::getline(response_stream, status_message);
 	if (!response_stream || http_version.substr(0, 5) != "HTTP/")
 	{
-		if (verbose) std::cerr << " - Invalid HTTP response\n";
+		if (verbose) std::cerr << "[http] Invalid response (not HTTP)\n";
 		return std::string();
 	}
 	if (status_code != 200)
 	{
-		if (verbose) std::cerr << " - Unexpected HTTP status code: " << status_code << "\n";
+		if (verbose) std::cerr << "[http] Unexpected status code: " << status_code << "\n";
 		return std::string();
 	}
 
@@ -140,7 +162,7 @@ std::string Network::http_get(const std::string& path)
 	// Process the response headers.
 	std::string header;
 	while (std::getline(response_stream, header) && header != "\r")
-		if (verbose > 1) std::cerr << " - [header] " << header << "\n";
+		if (verbose > 1) std::cerr << "[http/header] " << header << "\n";
 
 	// Read until EOF
 	boost::system::error_code error;
@@ -151,8 +173,8 @@ std::string Network::http_get(const std::string& path)
 	std::string content(boost::asio::buffers_begin(response_bufs),
 		boost::asio::buffers_begin(response_bufs) + response.size());
 
-	if (verbose) std::cerr << "Download successful" << std::endl;
-	if (verbose > 1) std::cerr << "Received content:\n" << content << std::endl;
+	if (verbose) std::cerr << "[http] Download successful" << std::endl;
+	if (verbose > 1) std::cerr << "[http] Received content:\n" << content << std::endl;
 
 	return content;
 }
@@ -164,7 +186,7 @@ boost::shared_ptr<boost::asio::ip::tcp::socket> Network::tcp_connect(
 	boost::asio::ip::tcp::resolver::query query(this->host, service);
 	boost::asio::ip::tcp::resolver::iterator it = resolver.resolve(query);
 	boost::shared_ptr<boost::asio::ip::tcp::socket> socket(new boost::asio::ip::tcp::socket(*tcp_service));
-	if (verbose) std::cerr << "Connecting to " << this->host << " on port "
+	if (verbose) std::cerr << "[tcp] Connecting to " << this->host << " on port "
 		<< it->endpoint().port() << "..." << std::endl;
 	boost::asio::connect(*socket, it);
 	// TODO: check for timeout

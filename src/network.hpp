@@ -36,6 +36,20 @@ class Network {
 		 */
 		Network(const std::string& host);
 
+		/// Change the port used for outgoing HTTP connections.
+		/**
+		 * @param port
+		 *   The new port number to use, or 0 for the default.
+		 */
+		void set_http_port(unsigned short port);
+
+		/// Get the HTTP port in use.
+		/**
+		 * @return A numeric value for the port currently in use.  Will return the
+		 *   actual port number if the default port is in use.
+		 */
+		unsigned short get_http_port();
+
 		/// Retrieve the HTTP headers from a default query ("/").
 		/**
 		 * @return A vector of strings, with each string being one header.
@@ -69,6 +83,7 @@ class Network {
 
 	private:
 		const std::string& host;
+		unsigned short port_http;
 		boost::asio::io_service io_service;
 		boost::asio::ip::tcp::resolver::iterator endpoint_iterator_http;
 
